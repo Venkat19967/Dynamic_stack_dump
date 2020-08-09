@@ -1,0 +1,515 @@
+diff -uNr kernel_old/arch/x86/syscalls/syscall_32.tbl kernel_new/arch/x86/syscalls/syscall_32.tbl
+--- kernel_old/arch/x86/syscalls/syscall_32.tbl	2017-06-17 10:44:31.000000000 -0700
++++ kernel_new/arch/x86/syscalls/syscall_32.tbl	2020-04-30 13:56:46.814798368 -0700
+@@ -365,3 +365,6 @@
+ 356	i386	memfd_create		sys_memfd_create
+ 357	i386	bpf			sys_bpf
+ 358	i386	execveat		sys_execveat			stub32_execveat
++359	i386	insdump			sys_insdump
++360	i386	rmdump			sys_rmdump
++361	i386	hello			sys_hello
+diff -uNr kernel_old/include/linux/dynamic_dump_stack.h kernel_new/include/linux/dynamic_dump_stack.h
+--- kernel_old/include/linux/dynamic_dump_stack.h	1969-12-31 17:00:00.000000000 -0700
++++ kernel_new/include/linux/dynamic_dump_stack.h	2020-04-30 14:12:11.384875360 -0700
+@@ -0,0 +1,7 @@
++
++
++
++extern int remove_kp(pid_t);
++
++
++
+diff -uNr kernel_old/include/linux/syscalls.h kernel_new/include/linux/syscalls.h
+--- kernel_old/include/linux/syscalls.h	2017-06-17 10:44:57.000000000 -0700
++++ kernel_new/include/linux/syscalls.h	2020-04-30 13:58:10.872808453 -0700
+@@ -65,8 +65,10 @@
+ struct perf_event_attr;
+ struct file_handle;
+ struct sigaltstack;
++struct dumpmode_t;
+ union bpf_attr;
+ 
++
+ #include <linux/types.h>
+ #include <linux/aio_abi.h>
+ #include <linux/capability.h>
+@@ -882,4 +884,7 @@
+ 			const char __user *const __user *argv,
+ 			const char __user *const __user *envp, int flags);
+ 
++asmlinkage long sys_hello(void);
++asmlinkage long sys_insdump(const char __user *symbolname, struct dumpmode_t __user * dumpmode);
++asmlinkage long sys_rmdump(int dumpid);
+ #endif
+diff -uNr kernel_old/kernel/exit.c kernel_new/kernel/exit.c
+--- kernel_old/kernel/exit.c	2017-06-17 10:44:58.000000000 -0700
++++ kernel_new/kernel/exit.c	2020-04-30 13:59:56.545621090 -0700
+@@ -3,7 +3,6 @@
+  *
+  *  Copyright (C) 1991, 1992  Linus Torvalds
+  */
+-
+ #include <linux/mm.h>
+ #include <linux/slab.h>
+ #include <linux/interrupt.h>
+@@ -54,6 +53,7 @@
+ #include <linux/writeback.h>
+ #include <linux/shm.h>
+ 
++#include <linux/dynamic_dump_stack.h>
+ #include <asm/uaccess.h>
+ #include <asm/unistd.h>
+ #include <asm/pgtable.h>
+@@ -655,6 +655,14 @@
+ 	int group_dead;
+ 	TASKS_RCU(int tasks_rcu_i);
+ 
++#ifdef CONFIG_DYNAMIC_DUMP_STACK
++	remove_kp(tsk->pid);
++#endif
++	profile_task_exit(tsk);
++
++
++
++
+ 	profile_task_exit(tsk);
+ 
+ 	WARN_ON(blk_needs_flush_plug(tsk));
+@@ -707,8 +715,8 @@
+ 
+ 	if (unlikely(in_atomic()))
+ 		pr_info("note: %s[%d] exited with preempt_count %d\n",
+-			current->comm, task_pid_nr(current),
+-			preempt_count());
++				current->comm, task_pid_nr(current),
++				preempt_count());
+ 
+ 	acct_update_integrals(tsk);
+ 	/* sync mm's RSS info before statistics gathering */
+@@ -848,7 +856,7 @@
+  * Take down every thread in the group.  This is called by fatal signals
+  * as well as by sys_exit_group (below).
+  */
+-void
++	void
+ do_group_exit(int exit_code)
+ {
+ 	struct signal_struct *sig = current->signal;
+@@ -901,7 +909,7 @@
+ 	int			notask_error;
+ };
+ 
+-static inline
++	static inline
+ struct pid *task_pid_type(struct task_struct *task, enum pid_type type)
+ {
+ 	if (type != PIDTYPE_PID)
+@@ -925,14 +933,14 @@
+ 	 * A "clone" child here is one that reports to its parent
+ 	 * using a signal other than SIGCHLD.) */
+ 	if (((p->exit_signal != SIGCHLD) ^ !!(wo->wo_flags & __WCLONE))
+-	    && !(wo->wo_flags & __WALL))
++			&& !(wo->wo_flags & __WALL))
+ 		return 0;
+ 
+ 	return 1;
+ }
+ 
+ static int wait_noreap_copyout(struct wait_opts *wo, struct task_struct *p,
+-				pid_t pid, uid_t uid, int why, int status)
++		pid_t pid, uid_t uid, int why, int status)
+ {
+ 	struct siginfo __user *infop;
+ 	int retval = wo->wo_rusage
+@@ -1118,7 +1126,7 @@
+ {
+ 	if (ptrace) {
+ 		if (task_is_stopped_or_traced(p) &&
+-		    !(p->jobctl & JOBCTL_LISTENING))
++				!(p->jobctl & JOBCTL_LISTENING))
+ 			return &p->exit_code;
+ 	} else {
+ 		if (p->signal->flags & SIGNAL_STOP_STOPPED)
+@@ -1146,7 +1154,7 @@
+  * search should terminate.
+  */
+ static int wait_task_stopped(struct wait_opts *wo,
+-				int ptrace, struct task_struct *p)
++		int ptrace, struct task_struct *p)
+ {
+ 	struct siginfo __user *infop;
+ 	int retval, exit_code, *p_code, why;
+@@ -1268,7 +1276,7 @@
+ 			retval = pid;
+ 	} else {
+ 		retval = wait_noreap_copyout(wo, p, pid, uid,
+-					     CLD_CONTINUED, SIGCONT);
++				CLD_CONTINUED, SIGCONT);
+ 		BUG_ON(retval == 0);
+ 	}
+ 
+@@ -1285,7 +1293,7 @@
+  * or another error from security_task_wait(), or still -ECHILD.
+  */
+ static int wait_consider_task(struct wait_opts *wo, int ptrace,
+-				struct task_struct *p)
++		struct task_struct *p)
+ {
+ 	/*
+ 	 * We can race with wait_task_zombie() from another thread.
+@@ -1439,10 +1447,10 @@
+ }
+ 
+ static int child_wait_callback(wait_queue_t *wait, unsigned mode,
+-				int sync, void *key)
++		int sync, void *key)
+ {
+ 	struct wait_opts *wo = container_of(wait, struct wait_opts,
+-						child_wait);
++			child_wait);
+ 	struct task_struct *p = key;
+ 
+ 	if (!eligible_pid(wo, p))
+@@ -1457,7 +1465,7 @@
+ void __wake_up_parent(struct task_struct *p, struct task_struct *parent)
+ {
+ 	__wake_up_sync_key(&parent->signal->wait_chldexit,
+-				TASK_INTERRUPTIBLE, 1, p);
++			TASK_INTERRUPTIBLE, 1, p);
+ }
+ 
+ static long do_wait(struct wait_opts *wo)
+@@ -1479,7 +1487,7 @@
+ 	 */
+ 	wo->notask_error = -ECHILD;
+ 	if ((wo->wo_type < PIDTYPE_MAX) &&
+-	   (!wo->wo_pid || hlist_empty(&wo->wo_pid->tasks[wo->wo_type])))
++			(!wo->wo_pid || hlist_empty(&wo->wo_pid->tasks[wo->wo_type])))
+ 		goto notask;
+ 
+ 	set_current_state(TASK_INTERRUPTIBLE);
+@@ -1528,21 +1536,21 @@
+ 		return -EINVAL;
+ 
+ 	switch (which) {
+-	case P_ALL:
+-		type = PIDTYPE_MAX;
+-		break;
+-	case P_PID:
+-		type = PIDTYPE_PID;
+-		if (upid <= 0)
+-			return -EINVAL;
+-		break;
+-	case P_PGID:
+-		type = PIDTYPE_PGID;
+-		if (upid <= 0)
++		case P_ALL:
++			type = PIDTYPE_MAX;
++			break;
++		case P_PID:
++			type = PIDTYPE_PID;
++			if (upid <= 0)
++				return -EINVAL;
++			break;
++		case P_PGID:
++			type = PIDTYPE_PGID;
++			if (upid <= 0)
++				return -EINVAL;
++			break;
++		default:
+ 			return -EINVAL;
+-		break;
+-	default:
+-		return -EINVAL;
+ 	}
+ 
+ 	if (type < PIDTYPE_MAX)
+@@ -1591,7 +1599,7 @@
+ 	long ret;
+ 
+ 	if (options & ~(WNOHANG|WUNTRACED|WCONTINUED|
+-			__WNOTHREAD|__WCLONE|__WALL))
++				__WNOTHREAD|__WCLONE|__WALL))
+ 		return -EINVAL;
+ 
+ 	if (upid == -1)
+@@ -1631,3 +1639,5 @@
+ }
+ 
+ #endif
++
++
+diff -uNr kernel_old/lib/dynamic_dump_stack.c kernel_new/lib/dynamic_dump_stack.c
+--- kernel_old/lib/dynamic_dump_stack.c	1969-12-31 17:00:00.000000000 -0700
++++ kernel_new/lib/dynamic_dump_stack.c	2020-04-30 14:10:11.661040369 -0700
+@@ -0,0 +1,222 @@
++#include<linux/kernel.h>
++#include<linux/init.h>
++#include<linux/sched.h>
++#include<linux/syscalls.h>
++#include<linux/string.h>
++#include<linux/kprobes.h>
++#include<linux/kallsyms.h>
++#include<linux/module.h>
++#include <linux/types.h>
++#include <linux/slab.h>
++
++//#include <linux/dynamic_dump_stack.h>
++
++
++//Head of the linked list of all the kprobes -- dummy head
++struct list_head ds_list_head = LIST_HEAD_INIT(ds_list_head);
++int dumpeid; 
++
++struct dumpmode_t {
++	unsigned int mode;
++};
++
++struct dump_stack_struct *node;
++struct ds{
++
++	int dumpeid; 
++	char symbolname[50];
++	struct kprobe kp;
++	pid_t pid;   
++	pid_t tgid;  
++	int dumpmode;  
++	struct list_head l;
++
++};
++
++
++struct dn {
++	struct list_head ln;
++	struct list_head* add;
++};
++
++
++int remove_kp(pid_t pid) {
++
++
++    struct list_head* i = NULL;
++    struct ds* struct_iter = NULL;
++
++    struct dn *dList, *temp = NULL;
++    struct list_head nodes_to_delete = LIST_HEAD_INIT(nodes_to_delete);
++
++    list_for_each(i, &ds_list_head) {
++	struct_iter = list_entry(i, struct ds, l);
++	if(struct_iter->pid == pid) {
++		printk("\nRemoving the follwing dumpid:%d\n",struct_iter->dumpeid);
++		unregister_kprobe(&struct_iter->kp);  
++		dList = kmalloc(sizeof(struct dn), GFP_KERNEL);
++		memset(dList, 0, sizeof(struct dn));
++		dList->add = i;
++		list_add(&dList->ln, &nodes_to_delete);
++	}
++    }
++
++
++   list_for_each(i, &nodes_to_delete) {
++	temp = list_entry(i, struct dn, ln);
++	list_del(temp->add);
++   }
++
++
++    return 1;
++}
++
++
++
++int handler_pre(struct kprobe *probe, struct pt_regs *regs)
++{
++
++
++	struct ds *temp;
++	struct task_struct* t = current;
++	pid_t tgid;
++	pid_t pid;
++	tgid = t->tgid;
++	pid = t->pid;
++
++	temp = container_of(probe, struct ds, kp);
++
++	if(temp->dumpmode > 1){
++		printk("\nInside >1");
++		printk("\nCurrent pid:%d\nActual pid:%d\nCurrent tgid:%d\nActual tgid:%d",pid,temp->pid,tgid,temp->tgid);
++		dump_stack();
++		return 0;
++	}
++
++	else if(temp->dumpmode == 0 && pid == temp->pid){
++		printk("\nInside 0");
++		printk("\nCurrent pid:%d\nActual pid:%d\nCurrent tgid:%d\nActual tgid:%d",pid,temp->pid,tgid,temp->tgid);
++		dump_stack();
++		return 0;
++	}
++
++	else if(temp->dumpmode == 1 && (pid == temp->pid || tgid == temp->tgid)){
++		printk("\nInside 1");
++		printk("\nCurrent pid:%d\nActual pid:%d\nCurrent tgid:%d\nActual tgid:%d",pid,temp->pid,tgid,temp->tgid);
++		dump_stack();
++		return 0;
++	}
++
++
++	printk("\nCannot do dump_stack()");
++	printk("\nCurrent pid:%d\nActual pid:%d\nCurrent tgid:%d\nActual tgid:%d",pid,temp->pid,tgid,temp->tgid);
++
++	return 0;
++}
++
++
++
++SYSCALL_DEFINE1(rmdump, int, dumpeid)
++{
++
++#ifdef CONFIG_DYNAMIC_DUMP_STACK
++
++	struct list_head* i = NULL;
++	struct ds* temp = NULL;
++	struct task_struct* task = current;
++	pid_t pid = task->pid;
++
++	printk("\nInside the rmdump definition");
++
++	list_for_each(i, &ds_list_head) {
++		temp = list_entry(i, struct ds, l);
++		if(temp->dumpeid == dumpeid && temp->pid == pid) 
++		{
++			printk("\nRemoving kprobe of this dumpid:%d",temp->dumpeid);
++			unregister_kprobe(&temp->kp);
++			list_del(i);
++			return 1;
++		}
++	}
++
++	printk("\nCannot remove probe with dumpid:%d",dumpeid);
++
++	return -EINVAL;
++#else
++	return 0;
++#endif
++
++}
++
++
++
++SYSCALL_DEFINE2(insdump,const char __user *, symbolname, struct dumpmode_t __user *, dumpmode)
++{
++
++#ifdef CONFIG_DYNAMIC_DUMP_STACK
++	unsigned long add;	
++	struct ds *d;
++	char * x;
++	struct dumpmode_t i;
++	struct task_struct* t;
++	pid_t tgid;
++	pid_t pid;
++
++
++	t = current;
++	tgid = t->tgid;
++	pid = t->pid;
++
++	printk("\nInside the insdump definition");
++
++	//symbolname from the user
++	x = kmalloc(sizeof(char)*50, GFP_KERNEL);
++	strncpy_from_user((char *)x,symbolname, 50);
++
++	//per kprobe structure
++	d = (struct ds *)kmalloc(sizeof(struct ds), GFP_KERNEL);
++	memset(d, 0, sizeof(struct ds));
++
++
++	d->pid = pid;
++	d->tgid = tgid;
++
++	//symbolname assigned to the structure
++	sprintf(d->symbolname,"%s",x);
++
++	//address for the symbol
++	add = kallsyms_lookup_name(d->symbolname);
++
++	//the dumpmode from user
++	if (copy_from_user(&i, dumpmode,sizeof(i))){
++		return -EFAULT;
++	}
++	d->dumpmode = i.mode;
++
++	if(add == 0)
++	{
++		printk(KERN_INFO "SYMBOL NOT FOUND\n");
++		return -EINVAL;
++	}
++	memset(&d->kp, 0, sizeof(struct kprobe));	
++	d->kp.pre_handler = handler_pre;
++	d->kp.addr = (kprobe_opcode_t *)add;
++
++	if(register_kprobe(&d->kp)){
++		printk(KERN_INFO "Error while setting kprobe on address %p\n", (void*)(add));
++		return -EINVAL;
++	}
++
++	//Incrementing my dumpid
++	d->dumpeid = dumpeid++;
++
++	list_add(&d->l, &ds_list_head);
++	printk("\nthe new kprobe is added in the list\n");
++
++	return d->dumpeid;
++#else
++	return 0;
++#endif
++
++}
++
+diff -uNr kernel_old/lib/hello.c kernel_new/lib/hello.c
+--- kernel_old/lib/hello.c	1969-12-31 17:00:00.000000000 -0700
++++ kernel_new/lib/hello.c	2020-04-30 14:10:51.540971360 -0700
+@@ -0,0 +1,17 @@
++#include<linux/kernel.h>
++#include<linux/init.h>
++#include<linux/sched.h>
++#include<linux/syscalls.h>
++#include<linux/string.h>
++#include<linux/kprobes.h>
++#include<linux/kallsyms.h>
++#include<linux/module.h>
++#include <linux/types.h>
++#include <linux/slab.h>
++
++asmlinkage long sys_hello(void)
++{
++
++        printk("Hello world\n");
++        return 0;
++}
+diff -uNr kernel_old/lib/Kconfig.debug kernel_new/lib/Kconfig.debug
+--- kernel_old/lib/Kconfig.debug	2017-06-17 10:44:58.000000000 -0700
++++ kernel_new/lib/Kconfig.debug	2020-04-30 14:23:46.664358662 -0700
+@@ -1715,6 +1715,11 @@
+ 
+ 	  If unsure, say N.
+ 
++config DYNAMIC_DUMP_STACK
++	bool "Enable/Disable Dynamic dump_stack()"
++	default n
++
++
+ source "samples/Kconfig"
+ 
+ source "lib/Kconfig.kgdb"
+diff -uNr kernel_old/lib/Makefile kernel_new/lib/Makefile
+--- kernel_old/lib/Makefile	2017-06-17 10:44:58.000000000 -0700
++++ kernel_new/lib/Makefile	2020-04-30 14:10:42.216311126 -0700
+@@ -26,7 +26,7 @@
+ 	 bust_spinlocks.o hexdump.o kasprintf.o bitmap.o scatterlist.o \
+ 	 gcd.o lcm.o list_sort.o uuid.o flex_array.o iovec.o clz_ctz.o \
+ 	 bsearch.o find_last_bit.o find_next_bit.o llist.o memweight.o kfifo.o \
+-	 percpu-refcount.o percpu_ida.o rhashtable.o reciprocal_div.o
++	 percpu-refcount.o percpu_ida.o rhashtable.o reciprocal_div.o hello.o dynamic_dump_stack.o
+ obj-y += string_helpers.o
+ obj-$(CONFIG_TEST_STRING_HELPERS) += test-string_helpers.o
+ obj-y += kstrtox.o
